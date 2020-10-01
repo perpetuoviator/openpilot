@@ -62,15 +62,15 @@ class Calibrator():
     calibration_params = Params().get("CalibrationParams")
 
     rpy_init = RPY_INIT
-    valid_blocks = 0
+    valid_blocks = 20
 
-    if param_put and calibration_params:
-      try:
-        calibration_params = json.loads(calibration_params)
-        rpy_init = calibration_params["calib_radians"]
-        valid_blocks = calibration_params['valid_blocks']
-      except Exception:
-        cloudlog.exception("CalibrationParams file found but error encountered")
+    # if param_put and calibration_params:
+    #   try:
+    #     calibration_params = json.loads(calibration_params)
+    #     rpy_init = calibration_params["calib_radians"]
+    #     valid_blocks = calibration_params['valid_blocks']
+    #   except Exception:
+    #     cloudlog.exception("CalibrationParams file found but error encountered")
     self.reset(rpy_init, valid_blocks)
     self.update_status()
 

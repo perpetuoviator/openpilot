@@ -363,8 +363,10 @@ void can_health_thread() {
     healthData.setUsbPowerMode(cereal::HealthData::UsbPowerMode(health.usb_power_mode));
     healthData.setSafetyModel(cereal::CarParams::SafetyModel(health.safety_model));
     healthData.setFanSpeedRpm(fan_speed_rpm);
-    healthData.setFaultStatus(cereal::HealthData::FaultStatus(health.fault_status));
+    //healthData.setFaultStatus(cereal::HealthData::FaultStatus(health.fault_status));
     healthData.setPowerSaveEnabled((bool)(health.power_save_enabled));
+
+    health.faults = health.faults & 0xfffffffe; // mask out relay fault bit
 
     // Convert faults bitset to capnp list
     std::bitset<sizeof(health.faults) * 8> fault_bits(health.faults);

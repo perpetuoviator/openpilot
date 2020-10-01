@@ -69,6 +69,7 @@ def clear_locks(root):
       cloudlog.exception("clear_locks failed")
 
 def is_on_wifi():
+  return True
   return HARDWARE.get_network_type() == NetworkType.wifi
 
 class Uploader():
@@ -150,7 +151,7 @@ class Uploader():
       headers = url_resp_json['headers']
       cloudlog.info("upload_url v1.3 %s %s", url, str(headers))
 
-      if fake_upload:
+      if fake_upload or (not fn.endswith('rlog.bz2')):
         cloudlog.info("*** WARNING, THIS IS A FAKE UPLOAD TO %s ***" % url)
 
         class FakeResponse():
@@ -228,6 +229,7 @@ def uploader_fn(exit_event):
   on_wifi = False
   while not exit_event.is_set():
     offroad = params.get("IsOffroad") == b'1'
+    offroad = True
     allow_raw_upload = (params.get("IsUploadRawEnabled") != b"0") and offroad
     if offroad and counter % 12 == 0:
       on_wifi = is_on_wifi()
