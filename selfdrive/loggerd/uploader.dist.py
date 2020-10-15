@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
-import os
-import re
-import time
-import json
-import random
 import ctypes
 import inspect
-import requests
-import traceback
-import threading
+import json
+import os
+import random
+import re
 import subprocess
+import threading
+import time
+import traceback
 
-from selfdrive.swaglog import cloudlog
-from selfdrive.loggerd.config import ROOT
+import requests
 
-from common import android
-from common.params import Params
+from cereal import log
+from common.hardware import HARDWARE
 from common.api import Api
-from common.xattr import getxattr, setxattr
+from common.params import Params
+from selfdrive.loggerd.xattr_cache import getxattr, setxattr
+from selfdrive.loggerd.config import ROOT
+from selfdrive.swaglog import cloudlog
 
+NetworkType = log.ThermalData.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
 
 fake_upload = os.getenv("FAKEUPLOAD") is not None
 
+
 def raise_on_thread(t, exctype):
+  '''Raises an exception in the threads with id tid'''
   for ctid, tobj in threading._active.items():
     if tobj is t:
       tid = ctid
@@ -32,7 +36,6 @@ def raise_on_thread(t, exctype):
   else:
     raise Exception("Could not find thread")
 
-  '''Raises an exception in the threads with id tid'''
   if not inspect.isclass(exctype):
     raise TypeError("Only types can be raised (not instances)")
 
@@ -68,44 +71,17 @@ def clear_locks(root):
     except OSError:
       cloudlog.exception("clear_locks failed")
 
-def get_local_ip():
-  try:
-    result = subprocess.check_output(["ifconfig", "wlan0"], encoding='utf8')
-    result = re.findall(r"inet addr:((\d+\.){3}\d+)", result)[0][0]
-    return result
-  except:
-    return ""
-
 def is_on_wifi():
-  # ConnectivityManager.getActiveNetworkInfo()
-  try:
-    # TODO: figure out why the android service call sometimes dies with SIGUSR2 (signal from MSGQ)
-    result = android.parse_service_call_string(android.service_call(["connectivity", "2"]))
-    if result is None:
-      return True
-    return 'WIFI' in result
-  except Exception:
-    cloudlog.exception("is_on_wifi failed")
-    return False
+  return HARDWARE.get_network_type() == NetworkType.wifi
 
 def is_on_hotspot():
   try:
-    result = get_local_ip()  # pylint: disable=unexpected-keyword-arg    
-
-    is_android = result.startswith('192.168.43.')
-    is_ios = result.startswith('172.20.10.')
-    is_entune = result.startswith('10.0.2.')
-
-    return (is_android or is_ios or is_entune)
+    result = subprocess.check_output(["ifconfig", "wlan0"], stderr=subprocess.STDOUT, encoding='utf8')
+    result = re.findall(r"inet addr:((\d+\.){3}\d+)", result)[0][0]
+    return (result.startswith('192.168.43.') or  # android
+            result.startswith('172.20.10.') or  # ios
+            result.startswith('10.0.2.'))  # toyota entune
   except Exception:
-    return False
-
-def is_on_homeWifi():
-  try:
-    result = get_local_ip()    
-
-    return result.startswith('10.10.')
-  except:
     return False
 
 class Uploader():
@@ -120,7 +96,7 @@ class Uploader():
     self.last_exc = None
 
     self.immediate_priority = {"qlog.bz2": 0, "qcamera.ts": 1}
-    self.high_priority = {"rlog.bz2": 0, "fcamera.hevc": 1, "dcamera.hevc": 2}
+    self.high_priority = {"rlog.bz2": 0, "fcamera.hevc": 1, "dcamera.hevc": 2, "ecamera.hevc": 3}
 
   def get_upload_sort(self, name):
     if name in self.immediate_priority:
@@ -149,14 +125,14 @@ class Uploader():
           is_uploaded = getxattr(fn, UPLOAD_ATTR_NAME)
         except OSError:
           cloudlog.event("uploader_getxattr_failed", exc=self.last_exc, key=key, fn=fn)
-          is_uploaded = True # deleter could have deleted
+          is_uploaded = True  # deleter could have deleted
         if is_uploaded:
           continue
-
         yield (name, key, fn)
 
   def next_file_to_upload(self, with_raw):
     upload_files = list(self.gen_upload_files())
+
     # try to upload qlog files first
     for name, key, fn in upload_files:
       if name in self.immediate_priority:
@@ -181,7 +157,7 @@ class Uploader():
       if url_resp.status_code == 412:
         self.last_resp = url_resp
         return
-        
+
       url_resp_json = json.loads(url_resp.text)
       url = url_resp_json['url']
       headers = url_resp_json['headers']
@@ -189,18 +165,15 @@ class Uploader():
 
       if fake_upload:
         cloudlog.info("*** WARNING, THIS IS A FAKE UPLOAD TO %s ***" % url)
+
         class FakeResponse():
           def __init__(self):
             self.status_code = 200
+
         self.last_resp = FakeResponse()
       else:
-        if fn.endswith(".bz2") or fn.endswith("*.ts"):
-          with open(fn, "rb") as f:
-            self.last_resp = requests.put("http://10.10.3.14/upload/eon/"+key.replace("/","-"), data=f, timeout=10, verify=False)
-            cloudlog.info("upload local %s completed: %s", key, self.last_resp)
-        with open(fn, "rb") as f2:
-          self.last_resp = requests.put(url, data=f2, headers=headers, timeout=10)
-          cloudlog.info("upload remote %s completed: %s", key, self.last_resp)
+        with open(fn, "rb") as f:
+          self.last_resp = requests.put(url, data=f, headers=headers, timeout=10)
     except Exception as e:
       self.last_exc = (e, traceback.format_exc())
       raise
@@ -264,80 +237,39 @@ def uploader_fn(exit_event):
   uploader = Uploader(dongle_id, ROOT)
 
   backoff = 0.1
-  idle_count = 0
-  while True:
-    allow_raw_upload = (params.get("IsUploadRawEnabled") != b"0")
-    allow_cellular = False #(params.get("IsUploadVideoOverCellularEnabled") != b"0")
-    on_hotspot = is_on_hotspot()
-    on_wifi = is_on_wifi()
-    should_upload = allow_cellular or (on_wifi and not on_hotspot)
-    with open("/sys/class/power_supply/battery/status") as f:
-      is_charging = f.read().strip() == "Charging"
+  counter = 0
+  should_upload = False
+  while not exit_event.is_set():
+    offroad = params.get("IsOffroad") == b'1'
+    allow_raw_upload = (params.get("IsUploadRawEnabled") != b"0") and offroad
+    check_network = (counter % 12 == 0 if offroad else True)
+    if check_network:
+      on_hotspot = is_on_hotspot()
+      on_wifi = is_on_wifi()
+      should_upload = on_wifi and not on_hotspot
 
-    # shutdown if still not charging after 5 min idle
-    if idle_count>5 and not is_charging:
-      os.system("/data/openpilot/shutdown.sh")
-      return
-
-    if exit_event.is_set():
-      return
-
-    #sleep for 60sec if not on wifi or is charging (i.e. connected to car turned on)
-    if not on_wifi or is_charging:
-      if not is_charging:
-        idle_count = idle_count + 1
-      time.sleep(60) 
+    d = uploader.next_file_to_upload(with_raw=allow_raw_upload and should_upload)
+    counter += 1
+    if d is None:  # Nothing to upload
+      time.sleep(60 if offroad else 5)
       continue
 
-    if allow_cellular:
-      on_hotspot = is_on_hotspot()
-      # process regular uploads
-      d = uploader.next_file_to_upload(with_raw=allow_raw_upload and should_upload)
-      if d is None:
-        time.sleep(5)
-        continue
+    key, fn = d
 
-      key, fn = d
-
-      cloudlog.event("uploader_netcheck", allow_cellular=allow_cellular, is_on_hotspot=on_hotspot, is_on_wifi=on_wifi)
-      cloudlog.info("to upload %r", d)
-      success = uploader.upload(key, fn)
-      if success:
-        backoff = 0.1
-      else:
-        cloudlog.info("backoff %r", backoff)
-        time.sleep(backoff + random.uniform(0, backoff))
-        backoff = min(backoff*2, 120)
-      cloudlog.info("upload done, success=%r", success)
- 
+    cloudlog.event("uploader_netcheck", is_on_hotspot=on_hotspot, is_on_wifi=on_wifi)
+    cloudlog.info("to upload %r", d)
+    success = uploader.upload(key, fn)
+    if success:
+      backoff = 0.1
     else:
-      on_home_wifi = is_on_homeWifi()
-      if on_home_wifi:
-        # inform server if on home Wifi
-        d = uploader.next_file_to_upload(with_raw=allow_raw_upload)
-        if d is None:
-          idle_count = idle_count + 1
-          time.sleep(60)
-          continue
-        idle_count = 0  
-        r = requests.get("http://10.10.3.14/eon/uploads" + ("None" if d is None else "Ready") + "?ip=" + get_local_ip(), timeout=10, verify=False)
-        if r.status_code in (200,201):
-          backoff = 0.1
-          time.sleep(180) # wait 3 min before trying again
-        else:
-          cloudlog.info("backoff %r", backoff)
-          time.sleep(backoff + random.uniform(0, backoff))
-          backoff = min(backoff*2, 120)
-      else:
-        # sleep for a minute and cycle around  
-        time.sleep(60)        
+      cloudlog.info("backoff %r", backoff)
+      time.sleep(backoff + random.uniform(0, backoff))
+      backoff = min(backoff*2, 120)
+    cloudlog.info("upload done, success=%r", success)
 
-def main(gctx=None):
-  if is_on_homeWifi():
-    r = requests.get("http://10.10.3.14/eon/startup", timeout=10, verify=False)
+def main():
   uploader_fn(threading.Event())
-  if is_on_homeWifi():
-    r = requests.get("http://10.10.3.14/eon/shutdown", timeout=10, verify=False)
+
 
 if __name__ == "__main__":
   main()

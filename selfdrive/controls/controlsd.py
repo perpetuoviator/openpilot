@@ -38,6 +38,7 @@ Desire = log.PathPlan.Desire
 LaneChangeState = log.PathPlan.LaneChangeState
 LaneChangeDirection = log.PathPlan.LaneChangeDirection
 EventName = car.CarEvent.EventName
+NoSteering = False
 
 
 class Controls:
@@ -346,6 +347,7 @@ class Controls:
 
   def state_control(self, CS):
     """Given the state, this function returns an actuators packet"""
+    global NoSteering
 
     plan = self.sm['plan']
     path_plan = self.sm['pathPlan']
@@ -354,6 +356,11 @@ class Controls:
 
     if CS.leftBlinker or CS.rightBlinker:
       self.last_blinker_frame = self.sm.frame
+
+    # handle lkasButton
+    for b in CS.buttonEvents:
+      if b.type in ["altButton1"] and b.pressed:
+        NoSteering = not NoSteering
 
     # State specific actions
 
@@ -371,7 +378,7 @@ class Controls:
     # Gas/Brake PID loop
     actuators.gas, actuators.brake = self.LoC.update(self.active, CS, v_acc_sol, plan.vTargetFuture, a_acc_sol, self.CP)
     # Steering PID loop and lateral MPC
-    actuators.steer, actuators.steerAngle, lac_log = self.LaC.update(self.active, CS, self.CP, path_plan)
+    actuators.steer, actuators.steerAngle, lac_log = self.LaC.update(self.active and not NoSteering, CS, self.CP, path_plan)
 
     # Check for difference between desired angle and angle for angle based control
     angle_control_saturated = self.CP.steerControlType == car.CarParams.SteerControlType.angle and \
@@ -383,8 +390,8 @@ class Controls:
       self.saturated_count = 0
 
     # Send a "steering required alert" if saturation count has reached the limit
-    if (lac_log.saturated and not CS.steeringPressed) or \
-       (self.saturated_count > STEER_ANGLE_SATURATION_TIMEOUT):
+    if not NoSteering and ((lac_log.saturated and not CS.steeringPressed) or \
+       (self.saturated_count > STEER_ANGLE_SATURATION_TIMEOUT)):
       # Check if we deviated from the path
       left_deviation = actuators.steer > 0 and path_plan.dPoly[3] > 0.1
       right_deviation = actuators.steer < 0 and path_plan.dPoly[3] < -0.1
@@ -396,6 +403,7 @@ class Controls:
 
   def publish_logs(self, CS, start_time, actuators, v_acc, a_acc, lac_log):
     """Send actuators and hud commands to the car, send controlsstate and MPC logging"""
+    global NoSteering
 
     CC = car.CarControl.new_message()
     CC.enabled = self.enabled
@@ -413,13 +421,13 @@ class Controls:
 
     CC.hudControl.setSpeed = float(self.v_cruise_kph * CV.KPH_TO_MS)
     CC.hudControl.speedVisible = self.enabled
-    CC.hudControl.lanesVisible = self.enabled
+    CC.hudControl.lanesVisible = self.enabled and not NoSteering
     CC.hudControl.leadVisible = self.sm['plan'].hasLead
 
     right_lane_visible = self.sm['pathPlan'].rProb > 0.5
     left_lane_visible = self.sm['pathPlan'].lProb > 0.5
-    CC.hudControl.rightLaneVisible = bool(right_lane_visible)
-    CC.hudControl.leftLaneVisible = bool(left_lane_visible)
+    CC.hudControl.rightLaneVisible = bool(right_lane_visible) and not NoSteering
+    CC.hudControl.leftLaneVisible = bool(left_lane_visible) and not NoSteering
 
     recent_blinker = (self.sm.frame - self.last_blinker_frame) * DT_CTRL < 5.0  # 5s blinker cooldown
     ldw_allowed = self.is_ldw_enabled and CS.vEgo > LDW_MIN_SPEED and not recent_blinker \
@@ -559,6 +567,8 @@ class Controls:
     self.prof.checkpoint("Sent")
 
   def controlsd_thread(self):
+    global NoSteering
+    NoSteering = False
     while True:
       self.step()
       self.rk.monitor_time()
