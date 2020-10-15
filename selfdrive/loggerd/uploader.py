@@ -14,11 +14,13 @@ import subprocess
 from selfdrive.swaglog import cloudlog
 from selfdrive.loggerd.config import ROOT
 
-from common import android
-from common.params import Params
+from cereal import log
+from common.hardware import HARDWARE
 from common.api import Api
-from common.xattr import getxattr, setxattr
+from common.params import Params
+from selfdrive.loggerd.xattr_cache import getxattr, setxattr
 
+NetworkType = log.ThermalData.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
 
@@ -77,16 +79,7 @@ def get_local_ip():
     return ""
 
 def is_on_wifi():
-  # ConnectivityManager.getActiveNetworkInfo()
-  try:
-    # TODO: figure out why the android service call sometimes dies with SIGUSR2 (signal from MSGQ)
-    result = android.parse_service_call_string(android.service_call(["connectivity", "2"]))
-    if result is None:
-      return True
-    return 'WIFI' in result
-  except Exception:
-    cloudlog.exception("is_on_wifi failed")
-    return False
+  return HARDWARE.get_network_type() == NetworkType.wifi
 
 def is_on_hotspot():
   try:
@@ -149,10 +142,9 @@ class Uploader():
           is_uploaded = getxattr(fn, UPLOAD_ATTR_NAME)
         except OSError:
           cloudlog.event("uploader_getxattr_failed", exc=self.last_exc, key=key, fn=fn)
-          is_uploaded = True # deleter could have deleted
+          is_uploaded = True  # deleter could have deleted
         if is_uploaded:
           continue
-
         yield (name, key, fn)
 
   def next_file_to_upload(self, with_raw):
